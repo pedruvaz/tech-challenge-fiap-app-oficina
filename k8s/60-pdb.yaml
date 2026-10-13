@@ -1,0 +1,15 @@
+# Garante que um drain de nó (upgrade, scale-down, manutenção) nunca derrube as
+# duas réplicas da API ao mesmo tempo: o drain espera haver outra pronta.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: api
+  namespace: tech-challenge
+  labels:
+    app.kubernetes.io/name: api
+    app.kubernetes.io/part-of: tech-challenge-fiap
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: api
