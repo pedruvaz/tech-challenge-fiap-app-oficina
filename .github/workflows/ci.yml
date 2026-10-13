@@ -1,0 +1,343 @@
+name: CI
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+    branches: [main, dev, 'feat/**']
+  workflow_call:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/oficina
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configura Node
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - name: Instala dependências
+        run: npm ci
+
+      - name: Gera Prisma Client
+        run: npx prisma generate
+
+      - name: Build
+        run: npm run build
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/oficina
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configura Node
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - name: Instala dependências
+        run: npm ci
+
+      - name: Gera Prisma Client
+        run: npx prisma generate
+
+      - name: Lint
+        run: npm run lint
+
+  test:
+    name: Testes
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: oficina
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d oficina"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      NODE_ENV: test
+      DB_HOST: localhost
+      DB_PORT: 5432
+      DB_USERNAME: postgres
+      DB_PASSWORD: postgres
+      DB_DATABASE: oficina
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/oficina
+      JWT_ACCESS_SECRET: ci-test-secret
+      JWT_ACCESS_EXPIRES_IN: 3600s
+      JWT_REFRESH_SECRET: ci-test-refresh-secret
+      JWT_REFRESH_EXPIRES_IN: 7d
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configura Node
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - name: Instala dependências
+        run: npm ci
+
+      - name: Gera Prisma Client
+        run: npx prisma generate
+
+      - name: Aplica migrations
+        run: npx prisma migrate deploy
+
+      - name: Roda seed
+        run: npx prisma db seed
+
+      - name: Testes unitários (com gate de cobertura)
+        run: npm run test:cov
+
+      - name: Testes e2e
+        run: npm run test:e2e
+
+      - name: Upload coverage
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage/
+          retention-days: 7
+
+  # O nome do job precisa bater com o contexto exigido pelo ruleset da main
+  # ('Build da imagem Docker'). Renomear aqui sem ajustar o ruleset deixa o
+  # check em 'Expected — waiting for status' e trava o merge de todo PR.
+  docker:
+    name: Build da imagem Docker
+    # Só valida o build onde o job `push` não roda: em main e dev a imagem já
+    # é construída e publicada lá, e construir duas vezes seria desperdício.
+    if: github.event_name == 'pull_request' || (github.ref != 'refs/heads/main' && github.ref != 'refs/heads/dev')
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Valida docker-compose
+        run: docker compose config -q
+
+      - name: Configura Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build da imagem (validação)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          tags: oficina-api:ci-${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+  push:
+    name: Push para o ECR
+    # Merge na main (produção) e na dev (homologação) publica a imagem com a
+    # tag do SHA — é ela que o Deploy leva ao EKS — e atualiza a tag latest.
+    # Os dois ambientes compartilham o mesmo repositório ECR e se separam por
+    # namespace no cluster; a tag é o SHA, então não há colisão entre eles.
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev')
+    runs-on: ubuntu-latest
+
+    permissions:
+      id-token: write # OIDC: troca o token do GitHub por credenciais temporárias da AWS
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Autentica na AWS via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Login no ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Configura Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build e push (tags SHA e latest)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ steps.ecr.outputs.registry }}/${{ vars.ECR_REPOSITORY }}:${{ github.sha }}
+            ${{ steps.ecr.outputs.registry }}/${{ vars.ECR_REPOSITORY }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # Sobe a aplicação num cluster Kubernetes real e valida o caminho que o
+  # avaliador roda na máquina dele — sem AWS, sem EKS, sem credencial nenhuma.
+  # Os passos são os mesmos do k8s/README.md: se o walkthrough documentado
+  # quebrar, este job quebra junto.
+  kind:
+    name: Kubernetes (kind)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    env:
+      NAMESPACE: tech-challenge
+      IMAGE: tech-challenge-fiap:latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configura Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build da imagem
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: tech-challenge-fiap:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Cria o cluster kind
+        uses: helm/kind-action@v1
+        with:
+          cluster_name: tech-challenge
+
+      - name: Carrega a imagem no nó do kind
+        run: kind load docker-image "$IMAGE" --name tech-challenge
+
+      - name: Namespace, RBAC e ConfigMap
+        run: |
+          kubectl apply -f k8s/00-namespace.yaml
+          kubectl apply -f k8s/05-rbac.yaml
+          kubectl apply -f k8s/10-configmap.yaml
+
+      - name: Secret de exemplo e Postgres
+        run: |
+          kubectl apply -f k8s/local/11-secret.example.yaml
+          kubectl apply -f k8s/local/20-postgres.yaml
+          kubectl -n "$NAMESPACE" rollout status statefulset/postgres --timeout=300s
+
+      - name: Job de migration
+        run: |
+          kubectl apply -f k8s/jobs/30-migrate-job.yaml
+          kubectl -n "$NAMESPACE" wait --for=condition=complete --timeout=300s job/migrate
+
+      - name: API, Service e HPA
+        run: |
+          kubectl apply -f k8s/40-api-deployment.yaml
+          kubectl apply -f k8s/41-api-service.yaml
+          kubectl apply -f k8s/50-hpa.yaml
+          kubectl -n "$NAMESPACE" rollout status deployment/api --timeout=300s
+
+      - name: Seed
+        run: kubectl -n "$NAMESPACE" exec deploy/api -- node dist/prisma/seed.js
+
+      - name: Smoke test — health, Swagger, login e rota protegida
+        run: |
+          set -euo pipefail
+
+          # port-forward no mesmo step que os curls: em step separado o processo
+          # em background morre junto com o shell do step
+          kubectl -n "$NAMESPACE" port-forward svc/api 3000:3000 &
+          trap 'kill %1 2>/dev/null || true' EXIT
+
+          for _ in $(seq 1 30); do
+            curl -fsS http://localhost:3000/health/liveness >/dev/null 2>&1 && break
+            sleep 2
+          done
+
+          echo "-> /health/liveness"
+          curl -fsS http://localhost:3000/health/liveness | grep -q '"status":"ok"'
+
+          echo "-> /health/readiness (checa o Postgres)"
+          curl -fsS http://localhost:3000/health/readiness | grep -q '"status":"ok"'
+
+          echo "-> /docs (Swagger)"
+          curl -fsS -o /dev/null http://localhost:3000/docs
+
+          echo "-> POST /auth/login com o usuário do seed"
+          TOKEN=$(curl -fsS -X POST http://localhost:3000/auth/login -H 'Content-Type: application/json' -d '{"email":"admin@oficina.com","senha":"senha123"}' | jq -r '.accessToken // empty')
+          test -n "$TOKEN" || { echo "login não devolveu accessToken"; exit 1; }
+
+          echo "-> GET /clientes com Bearer (prova seed + JWT + banco)"
+          curl -fsS -H "Authorization: Bearer $TOKEN" http://localhost:3000/clientes | jq -e 'length > 0' >/dev/null
+
+          echo "OK - aplicação funcional em Kubernetes, sem nenhum recurso AWS"
+
+      - name: Estado do cluster
+        if: always()
+        run: kubectl -n "$NAMESPACE" get pods,svc,statefulset,deployment,job,hpa -o wide
+
+      - name: Diagnóstico (só em falha)
+        if: failure()
+        run: |
+          kubectl -n "$NAMESPACE" describe pods || true
+          kubectl -n "$NAMESPACE" logs job/migrate --all-containers --tail=100 || true
+          kubectl -n "$NAMESPACE" logs deployment/api --all-containers --tail=200 || true
+          kubectl -n "$NAMESPACE" logs statefulset/postgres --tail=50 || true
+
+  quality-gate:
+    name: Quality Gate
+    runs-on: ubuntu-latest
+    needs: [build, lint, test, docker, kind, push]
+    if: always()
+
+    steps:
+      - name: Quality Gate
+        run: |
+          # "docker" é skipped em push para main (substituído pelo job "push").
+          # "push"   é skipped em PRs e branches que não sejam main.
+          # Skipped é aceito em ambos; qualquer outro resultado falha o gate.
+          if [[ "${{ needs.build.result }}"  != "success" || \
+                "${{ needs.lint.result }}"   != "success" || \
+                "${{ needs.test.result }}"   != "success" || \
+                ("${{ needs.docker.result }}" != "success" && "${{ needs.docker.result }}" != "skipped") || \
+                ("${{ needs.kind.result }}"   != "success") || \
+                ("${{ needs.push.result }}"   != "success" && "${{ needs.push.result }}"   != "skipped") ]]; then
+            echo "Quality Gate FALHOU:"
+            echo "  build  → ${{ needs.build.result }}"
+            echo "  lint   → ${{ needs.lint.result }}"
+            echo "  test   → ${{ needs.test.result }}"
+            echo "  docker → ${{ needs.docker.result }}"
+            echo "  kind   → ${{ needs.kind.result }}"
+            echo "  push   → ${{ needs.push.result }}"
+            exit 1
+          fi
+          echo "Quality Gate aprovado — build, lint, testes, Docker, kind e push OK."

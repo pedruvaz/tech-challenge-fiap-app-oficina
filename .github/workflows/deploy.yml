@@ -1,0 +1,193 @@
+# Deploy da API no EKS.
+#
+# Pré-requisitos (uma vez, depois do `terraform apply` das stacks base/ e cluster/):
+#   Secret  AWS_DEPLOY_ROLE_ARN   output `github_actions_role_arn` da stack base/
+#   Var     AWS_REGION            ex.: us-east-1
+#   Var     ECR_REPOSITORY        ex.: tech-challenge-fiap
+#   Var     EKS_CLUSTER_NAME      ex.: tech-challenge
+#   Var     API_SECRET_NAME       ex.: tech-challenge-fiap/api
+#
+# Layout esperado em k8s/:
+#   k8s/*.yaml                    estado declarativo aplicado a cada deploy
+#   k8s/jobs/30-migrate-job.yaml  Job de migration, aplicado com a imagem da release
+#   k8s/local/                    só para desenvolvimento local (kind) — o CI ignora
+name: Deploy
+
+on:
+  # Dispara sozinho quando o workflow CI (que inclui o push para o ECR)
+  # completa. `main` vai para produção e `dev` para homologação — ver o passo
+  # "Define o ambiente".
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main, dev]
+  # Ou manualmente, com uma tag específica já publicada no ECR
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: 'Tag da imagem no ECR (default: SHA do commit)'
+        required: false
+        default: ''
+
+concurrency:
+  # Por ambiente: um deploy de homologação não deve cancelar nem esperar um de
+  # produção.
+  group: deploy-eks-${{ github.event.workflow_run.head_branch || github.ref_name }}
+  cancel-in-progress: false
+
+permissions:
+  id-token: write # OIDC assume a role da AWS
+  contents: read
+
+jobs:
+  deploy:
+    name: Migration, manifestos e rollout
+    # No gatilho automático, só segue se o build+push da imagem passou
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # No gatilho automático, usa o commit que gerou a imagem
+          ref: ${{ github.event.workflow_run.head_sha || github.ref }}
+
+      - name: Define a tag da imagem
+        id: meta
+        run: echo "tag=${{ inputs.image_tag || github.event.workflow_run.head_sha || github.sha }}" >> "$GITHUB_OUTPUT"
+
+      # Homologação e produção dividem o mesmo cluster e se separam por
+      # namespace. Duplicar o cluster custaria o dobro sem ganho — o
+      # isolamento que importa aqui (rede, quota, RBAC, Secret) o namespace já
+      # dá. Os manifestos têm `tech-challenge` fixo; o `sed` abaixo reescreve
+      # para o namespace do ambiente antes do apply.
+      - name: Define o ambiente
+        id: env
+        run: |
+          BRANCH="${{ github.event.workflow_run.head_branch || github.ref_name }}"
+          if [ "$BRANCH" = "main" ]; then
+            echo "NAMESPACE=tech-challenge"          >> "$GITHUB_ENV"
+            echo "ambiente=producao"                 >> "$GITHUB_OUTPUT"
+          else
+            echo "NAMESPACE=tech-challenge-homolog"  >> "$GITHUB_ENV"
+            echo "ambiente=homologacao"              >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Aponta os manifestos para o namespace do ambiente
+        run: |
+          # `namespace: tech-challenge` em todos os manifestos e o `name:` do
+          # próprio Namespace. A âncora `$` evita casar com
+          # `tech-challenge-homolog` numa segunda execução do sed.
+          sed -i "s|^\( *namespace: \)tech-challenge$|\1$NAMESPACE|" \
+            k8s/*.yaml k8s/jobs/*.yaml
+          sed -i "s|^\( *name: \)tech-challenge$|\1$NAMESPACE|" \
+            k8s/00-namespace.yaml
+
+          echo "Ambiente: ${{ steps.env.outputs.ambiente }} — namespace $NAMESPACE"
+          grep -h 'namespace:' k8s/*.yaml | sort -u
+
+      - name: Autentica na AWS via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Login no ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Configura o kubectl
+        run: aws eks update-kubeconfig --region "${{ vars.AWS_REGION }}" --name "${{ vars.EKS_CLUSTER_NAME }}"
+
+      # O segredo nasce no Secrets Manager (repositório infra-db) e vira o Secret
+      # `api-secrets` consumido pelo Deployment — nenhum valor passa pelo repo.
+      - name: Namespace e Secret da API (Secrets Manager -> k8s)
+        run: |
+          kubectl apply -f k8s/00-namespace.yaml
+          aws secretsmanager get-secret-value \
+            --secret-id "${{ vars.API_SECRET_NAME }}" \
+            --query SecretString --output text > /tmp/api-secret.json
+
+          # RESEND_API_KEY é opcional (var resend_api_key do repositório infra-db).
+          # Só entra no Secret quando existe e não é vazia: uma chave vazia
+          # faria o SDK da Resend lançar do mesmo jeito que a ausência, e o
+          # Deployment já trata a ausência com secretKeyRef optional.
+          RESEND_EXTRA=""
+          RESEND_KEY=$(jq -r '.RESEND_API_KEY // empty' /tmp/api-secret.json)
+          if [ -n "$RESEND_KEY" ]; then
+            RESEND_EXTRA="--from-literal=RESEND_API_KEY=$RESEND_KEY"
+          fi
+
+          kubectl -n "$NAMESPACE" create secret generic api-secrets \
+            --from-literal=DATABASE_URL="$(jq -r .DATABASE_URL /tmp/api-secret.json)" \
+            --from-literal=JWT_ACCESS_SECRET="$(jq -r .JWT_ACCESS_SECRET /tmp/api-secret.json)" \
+            --from-literal=JWT_REFRESH_SECRET="$(jq -r .JWT_REFRESH_SECRET /tmp/api-secret.json)" \
+            $RESEND_EXTRA \
+            --dry-run=client -o yaml | kubectl apply -f -
+          rm /tmp/api-secret.json
+
+      # APP_URL e FRONTEND_URL entram no ConfigMap ANTES do Deployment: `envFrom`
+      # é lido na criação do pod, então corrigir depois exigiria outro rollout.
+      #
+      # O hostname do NLB não é conhecido de antemão (muda a cada recriação do
+      # cluster), por isso o Service sobe primeiro e o valor é resolvido aqui —
+      # mesmo padrão do `sed` da imagem no passo seguinte.
+      - name: Resolve as URLs públicas no ConfigMap
+        env:
+          FRONTEND_URL: ${{ vars.FRONTEND_URL }}
+          ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
+          AWS_REGION: ${{ vars.AWS_REGION }}
+        run: |
+          # O bucket do front nasce como `<project>-front-<conta>` na stack
+          # base/ do repositório infra-k8s (terraform/base/s3-frontend.tf),
+          # então dá para derivar sem depender de uma variable — que exige
+          # admin no repo para ser criada.
+          # A var FRONTEND_URL, se existir, tem precedência.
+          if [ -z "$FRONTEND_URL" ]; then
+            ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
+            FRONTEND_URL="http://${ECR_REPOSITORY}-front-${ACCOUNT}.s3-website-${AWS_REGION}.amazonaws.com"
+            echo "var FRONTEND_URL ausente — derivada do bucket padrão"
+          fi
+
+          kubectl apply -f k8s/41-api-service.yaml
+
+          for _ in $(seq 1 60); do
+            HOST=$(kubectl -n "$NAMESPACE" get svc api -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true)
+            [ -n "$HOST" ] && break
+            sleep 5
+          done
+
+          if [ -z "$HOST" ]; then
+            echo "::error::Service api ficou 5 min sem hostname de NLB — os links de aprovação sairiam quebrados"
+            exit 1
+          fi
+
+          echo "APP_URL      = http://$HOST:3000"
+          echo "FRONTEND_URL = $FRONTEND_URL"
+
+          sed -i "s|^  APP_URL: .*|  APP_URL: \"http://$HOST:3000\"|" k8s/10-configmap.yaml
+          sed -i "s|^  FRONTEND_URL: .*|  FRONTEND_URL: \"$FRONTEND_URL\"|" k8s/10-configmap.yaml
+
+      # -f não é recursivo: k8s/jobs/ e k8s/local/ ficam de fora de propósito.
+      # O secret de exemplo é removido para não sobrescrever o api-secrets criado acima.
+      - name: Aplica os manifestos base
+        env:
+          IMG: ${{ steps.ecr.outputs.registry }}/${{ vars.ECR_REPOSITORY }}:${{ steps.meta.outputs.tag }}
+        run: |
+          rm -f k8s/11-secret.example.yaml
+          sed -i "s|image: tech-challenge-fiap:latest|image: $IMG|g" k8s/40-api-deployment.yaml
+          kubectl apply -f k8s/
+
+      # Migration roda uma vez por release, com a imagem da release; o
+      # initContainer do Deployment espera este Job completar antes de subir a API.
+      - name: Roda a migration como Job
+        env:
+          IMG: ${{ steps.ecr.outputs.registry }}/${{ vars.ECR_REPOSITORY }}:${{ steps.meta.outputs.tag }}
+        run: |
+          kubectl -n "$NAMESPACE" delete job migrate --ignore-not-found
+          sed "s|image: tech-challenge-fiap:latest|image: $IMG|" k8s/jobs/30-migrate-job.yaml | kubectl apply -f -
+          kubectl -n "$NAMESPACE" wait --for=condition=complete --timeout=300s job/migrate
+
+      - name: Acompanha o rollout
+        run: kubectl -n "$NAMESPACE" rollout status deployment/api --timeout=5m
