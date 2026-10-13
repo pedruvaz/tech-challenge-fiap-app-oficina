@@ -8,7 +8,7 @@
 #   Var     API_SECRET_NAME       ex.: tech-challenge-fiap/api
 #
 # Layout esperado em k8s/:
-#   k8s/*.yaml                    estado declarativo aplicado a cada deploy
+#   k8s/*.yaml                    estado declarativo, aplicado por arquivo (ver ordem abaixo)
 #   k8s/jobs/30-migrate-job.yaml  Job de migration, aplicado com a imagem da release
 #   k8s/local/                    só para desenvolvimento local (kind) — o CI ignora
 name: Deploy
@@ -65,6 +65,7 @@ jobs:
       - name: Define o ambiente
         id: env
         run: |
+          set -euo pipefail
           BRANCH="${{ github.event.workflow_run.head_branch || github.ref_name }}"
           if [ "$BRANCH" = "main" ]; then
             echo "NAMESPACE=tech-challenge"          >> "$GITHUB_ENV"
@@ -76,6 +77,7 @@ jobs:
 
       - name: Aponta os manifestos para o namespace do ambiente
         run: |
+          set -euo pipefail
           # `namespace: tech-challenge` em todos os manifestos e o `name:` do
           # próprio Namespace. A âncora `$` evita casar com
           # `tech-challenge-homolog` numa segunda execução do sed.
@@ -104,6 +106,7 @@ jobs:
       # `api-secrets` consumido pelo Deployment — nenhum valor passa pelo repo.
       - name: Namespace e Secret da API (Secrets Manager -> k8s)
         run: |
+          set -euo pipefail
           kubectl apply -f k8s/00-namespace.yaml
           aws secretsmanager get-secret-value \
             --secret-id "${{ vars.API_SECRET_NAME }}" \
@@ -139,6 +142,7 @@ jobs:
           ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
           AWS_REGION: ${{ vars.AWS_REGION }}
         run: |
+          set -euo pipefail
           # O bucket do front nasce como `<project>-front-<conta>` na stack
           # base/ do repositório infra-k8s (terraform/base/s3-frontend.tf),
           # então dá para derivar sem depender de uma variable — que exige
@@ -169,15 +173,18 @@ jobs:
           sed -i "s|^  APP_URL: .*|  APP_URL: \"http://$HOST:3000\"|" k8s/10-configmap.yaml
           sed -i "s|^  FRONTEND_URL: .*|  FRONTEND_URL: \"$FRONTEND_URL\"|" k8s/10-configmap.yaml
 
-      # -f não é recursivo: k8s/jobs/ e k8s/local/ ficam de fora de propósito.
-      # O secret de exemplo é removido para não sobrescrever o api-secrets criado acima.
-      - name: Aplica os manifestos base
-        env:
-          IMG: ${{ steps.ecr.outputs.registry }}/${{ vars.ECR_REPOSITORY }}:${{ steps.meta.outputs.tag }}
+      # Ordem importa: o Deployment só é aplicado DEPOIS da migration completar.
+      # Se fosse aplicado antes, o Job `migrate` da release anterior ainda estaria
+      # `Complete` e os pods novos passariam pelo initContainer `wait-migrate`
+      # sem esperar a migration nova — subiriam contra o schema velho.
+      #
+      # Por isso o apply é seletivo (nada de `kubectl apply -f k8s/` em bloco) e
+      # k8s/11-secret.example.yaml nunca entra: o `api-secrets` real foi criado
+      # acima a partir do Secrets Manager.
+      - name: Aplica RBAC e ConfigMap
         run: |
-          rm -f k8s/11-secret.example.yaml
-          sed -i "s|image: tech-challenge-fiap:latest|image: $IMG|g" k8s/40-api-deployment.yaml
-          kubectl apply -f k8s/
+          set -euo pipefail
+          kubectl apply -f k8s/00-namespace.yaml -f k8s/05-rbac.yaml -f k8s/10-configmap.yaml
 
       # Migration roda uma vez por release, com a imagem da release; o
       # initContainer do Deployment espera este Job completar antes de subir a API.
@@ -185,9 +192,41 @@ jobs:
         env:
           IMG: ${{ steps.ecr.outputs.registry }}/${{ vars.ECR_REPOSITORY }}:${{ steps.meta.outputs.tag }}
         run: |
+          set -euo pipefail
           kubectl -n "$NAMESPACE" delete job migrate --ignore-not-found
           sed "s|image: tech-challenge-fiap:latest|image: $IMG|" k8s/jobs/30-migrate-job.yaml | kubectl apply -f -
-          kubectl -n "$NAMESPACE" wait --for=condition=complete --timeout=300s job/migrate
+          if ! kubectl -n "$NAMESPACE" wait --for=condition=complete --timeout=300s job/migrate; then
+            echo "::error::Migration não completou em 300s (falhou ou travou) — logs do Job abaixo; o Deployment NÃO foi atualizado"
+            kubectl -n "$NAMESPACE" logs job/migrate --tail=200 || true
+            exit 1
+          fi
 
+      # Só chega aqui com a migration já aplicada.
+      - name: Aplica Deployment, Service, HPA e PDB
+        env:
+          IMG: ${{ steps.ecr.outputs.registry }}/${{ vars.ECR_REPOSITORY }}:${{ steps.meta.outputs.tag }}
+        run: |
+          set -euo pipefail
+          sed -i "s|image: tech-challenge-fiap:latest|image: $IMG|g" k8s/40-api-deployment.yaml
+          kubectl apply \
+            -f k8s/40-api-deployment.yaml \
+            -f k8s/41-api-service.yaml \
+            -f k8s/50-hpa.yaml \
+            -f k8s/60-pdb.yaml
+
+      # Com `maxUnavailable: 0` os pods antigos continuam servindo enquanto o
+      # rollout trava, então uma falha aqui não derruba a API. O `undo` serve só
+      # para não deixar um ReplicaSet quebrado pendurado (tentando subir pods em
+      # loop). Ele NÃO reverte a migration: o schema já foi alterado, e a versão
+      # anterior da API precisa ser compatível com ele (migrations aditivas).
+      # O `describe` vem antes do `undo` porque o undo remove os pods quebrados e
+      # levaria o diagnóstico junto.
       - name: Acompanha o rollout
-        run: kubectl -n "$NAMESPACE" rollout status deployment/api --timeout=5m
+        run: |
+          set -euo pipefail
+          if ! kubectl -n "$NAMESPACE" rollout status deployment/api --timeout=5m; then
+            echo "::error::Rollout do deployment/api não completou em 5 min — revertendo para a revisão anterior"
+            kubectl -n "$NAMESPACE" describe pods -l app.kubernetes.io/name=api || true
+            kubectl -n "$NAMESPACE" rollout undo deployment/api || echo "::warning::rollout undo falhou (primeira release, sem revisão anterior?)"
+            exit 1
+          fi

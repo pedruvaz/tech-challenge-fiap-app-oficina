@@ -25,6 +25,16 @@ spec:
       serviceAccountName: api
       # Dá tempo do preStop + shutdown hook drenarem as conexões antes do kill
       terminationGracePeriodSeconds: 30
+      # Espalha as réplicas entre AZs. ScheduleAnyway (e não DoNotSchedule) de
+      # propósito: é preferência, não exigência — se só houver nós numa AZ, o pod
+      # ainda agenda em vez de ficar Pending e travar o rollout.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: api
       # espera o Job de migrations ficar Complete antes de subir a API
       initContainers:
         - name: wait-migrate
@@ -35,6 +45,17 @@ spec:
             - -c
             - |
               kubectl -n tech-challenge wait --for=condition=complete --timeout=300s job/migrate
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
       containers:
         - name: api
           image: tech-challenge-fiap:latest
