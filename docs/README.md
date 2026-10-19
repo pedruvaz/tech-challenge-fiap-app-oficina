@@ -10,7 +10,7 @@
 >
 > O conteúdo técnico continua válido; só a localização dos arquivos mudou.
 
-# Tech Challenge — Fase 1 · Documentação
+# Tech Challenge — Documentação
 
 > Sistema Integrado de Atendimento e Execução de Serviços para uma **oficina mecânica**.
 > MVP de back-end com foco em gestão de **ordens de serviço, clientes, veículos, peças, insumos e serviços**, aplicando **DDD** (Domain-Driven Design).
@@ -33,6 +33,17 @@ Esta pasta concentra toda a documentação técnica e de negócio do projeto. Ca
 | 8 | [Checklist de Entregas](./08-checklist.md) | Acompanhamento das entregas da Fase 1 |
 | 9 | [Relatório de Vulnerabilidades](./09-relatorio-vulnerabilidades.md) | Análise `npm audit` das dependências |
 | 10 | [Diagrama C4](./10-diagrama-c4.md) | Diagramas C4 (Contexto, Containers, Componentes e Código) em draw.io |
+| 11 | [Melhorias de Docker e Pipeline](./11-melhorias-Docker-Pipeline.md) | Otimizações da imagem e do fluxo de build |
+| 12 | [Infraestrutura e Deploy](./12-infra-deploy.md) | Provisionamento e publicação na nuvem |
+| 13 | [CI/CD com Kubernetes](./13-cicd-kubernetes.md) | Pipeline de entrega contínua no cluster |
+| 14 | [Contrato da Fase 3](./14-fase3-contrato.md) | Fronteira entre os quatro repositórios: outputs, segredo compartilhado e configuração obrigatória |
+| 15 | [RFCs](./15-rfcs/) | Decisões técnicas: escolha da nuvem, banco gerenciado e estratégia de autenticação |
+| 16 | [ADRs](./16-adrs/) | Decisões arquiteturais: quatro repositórios, comunicação entre eles e escalabilidade com HPA |
+
+> Os documentos 12 e 13 são anteriores à quebra em quatro repositórios e
+> divergem do código vigente em pontos concretos (citam `infra/terraform`
+> dentro deste repositório, GHCR e `KUBE_CONFIG`). Para o estado atual, veja
+> o documento 14 e os ADRs.
 
 ---
 
