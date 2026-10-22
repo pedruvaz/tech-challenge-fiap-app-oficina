@@ -78,7 +78,6 @@ Um resumo dos bounded contexts e da linguagem ubÃ­qua derivados desse board estÃ
 
 | Integrante |
 | ---------- |
-| Nayara |
 | Pedro |
 | Matheus |
 | Guilherme |
