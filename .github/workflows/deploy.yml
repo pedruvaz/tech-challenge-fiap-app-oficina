@@ -130,6 +130,47 @@ jobs:
             --dry-run=client -o yaml | kubectl apply -f -
           rm /tmp/api-secret.json
 
+      # New Relic — integração Kubernetes (métricas de nó/pod, logs via Fluent Bit,
+      # kube-state-metrics), instalada via Helm. Traces NÃO passam por aqui: a API
+      # exporta direto via OTLP (ConfigMap + Secret abaixo). `helm upgrade --install`
+      # é idempotente, então rodar a cada deploy é seguro. A chave vem do mesmo JSON
+      # do Secrets Manager (NR_LICENSE_KEY, var `newrelic_license_key` do infra-db);
+      # sem ela o step só avisa e o deploy segue, sem telemetria.
+      - name: New Relic — integração Kubernetes (Helm, idempotente)
+        run: |
+          set -euo pipefail
+          NR_LICENSE_KEY=$(aws secretsmanager get-secret-value \
+            --secret-id "${{ vars.API_SECRET_NAME }}" \
+            --query SecretString --output text | jq -r '.NR_LICENSE_KEY // empty')
+          if [ -z "$NR_LICENSE_KEY" ]; then
+            echo "::warning::NR_LICENSE_KEY ausente no Secrets Manager — integração K8s do New Relic não instalada"
+            exit 0
+          fi
+          helm repo add newrelic https://helm-charts.newrelic.com --force-update
+          helm upgrade --install newrelic-bundle newrelic/nri-bundle \
+            --set global.licenseKey="$NR_LICENSE_KEY" \
+            --set global.cluster="${{ vars.EKS_CLUSTER_NAME }}" \
+            --namespace newrelic --create-namespace --wait --timeout 5m
+
+      # Secret `newrelic-secrets` no namespace do ambiente: o Deployment lê
+      # NR_LICENSE_KEY dele (secretKeyRef optional) e monta o header do OTLP.
+      # Sem a chave, remove o Secret para o pod subir com a telemetria desligada
+      # em vez de mandar um header inválido para o New Relic.
+      - name: New Relic — Secret da API (Secrets Manager -> k8s)
+        run: |
+          set -euo pipefail
+          NR_LICENSE_KEY=$(aws secretsmanager get-secret-value \
+            --secret-id "${{ vars.API_SECRET_NAME }}" \
+            --query SecretString --output text | jq -r '.NR_LICENSE_KEY // empty')
+          if [ -z "$NR_LICENSE_KEY" ]; then
+            echo "::warning::NR_LICENSE_KEY ausente — pods sobem sem enviar traces ao New Relic"
+            kubectl -n "$NAMESPACE" delete secret newrelic-secrets --ignore-not-found
+            exit 0
+          fi
+          kubectl -n "$NAMESPACE" create secret generic newrelic-secrets \
+            --from-literal=NR_LICENSE_KEY="$NR_LICENSE_KEY" \
+            --dry-run=client -o yaml | kubectl apply -f -
+
       # APP_URL e FRONTEND_URL entram no ConfigMap ANTES do Deployment: `envFrom`
       # é lido na criação do pod, então corrigir depois exigiria outro rollout.
       #
