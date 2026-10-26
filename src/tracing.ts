@@ -17,7 +17,16 @@ import { NodeSDK, tracing } from '@opentelemetry/sdk-node';
 //   OTEL_EXPORTER_OTLP_ENDPOINT definido -> OTLP (collector/Jaeger/vendor)
 //   OTEL_TRACES_EXPORTER=console        -> spans no stdout (kubectl logs)
 //   nada definido                       -> SDK nem sobe; custo zero
-const otlpEndpoint = process.env.OTEL_EXPORTER_OTLP_ENDPOINT;
+// Header do OTLP com placeholder não resolvido (`api-key=$(NR_LICENSE_KEY)` quando
+// o Secret `newrelic-secrets` não existe no namespace — o K8s deixa a referência
+// literal) ou com valor vazio (`api-key=` no compose sem NR_LICENSE_KEY no .env):
+// exportar assim só rende 403 a cada lote. Trata como "sem OTLP" e cai no
+// console ou no desligado, como se o endpoint não estivesse definido.
+const otlpHeaders = process.env.OTEL_EXPORTER_OTLP_HEADERS ?? '';
+const otlpHeadersUsaveis = !/\$\(|=\s*(,|$)/.test(otlpHeaders);
+const otlpEndpoint = otlpHeadersUsaveis
+  ? process.env.OTEL_EXPORTER_OTLP_ENDPOINT
+  : undefined;
 const consoleExporter = process.env.OTEL_TRACES_EXPORTER === 'console';
 const enabled =
   process.env.OTEL_SDK_DISABLED !== 'true' &&

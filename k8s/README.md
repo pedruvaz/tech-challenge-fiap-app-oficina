@@ -16,6 +16,8 @@ O diretório é dividido pelo que o CI aplica: `k8s/*.yaml` é o estado que o wo
 | `40-api-deployment.yaml` | Deployment da API com 2 réplicas, probes, preStop, securityContext não-root e initContainer que espera o Job. |
 | `41-api-service.yaml` | Service `LoadBalancer` — NLB internet-facing no EKS Auto Mode; em kind fica `Pending` (inofensivo), acesso via port-forward. |
 | `50-hpa.yaml` | HPA por CPU (min=2, max=6, target 70%). |
+| `60-pdb.yaml` | PodDisruptionBudget da API — garante réplica de pé durante drain de nó e rolling update. |
+| `60-newrelic-secret.example.yaml` | Template do Secret `newrelic-secrets` (`NR_LICENSE_KEY`). **No EKS o Secret vem do Secrets Manager**, criado pelo deploy; sem a chave o pod sobe sem telemetria. |
 | `jobs/30-migrate-job.yaml` | Job que roda `prisma migrate deploy` uma vez por release — o deploy do CI o recria com a imagem da release; localmente, aplicar à mão. |
 | `local/11-secret.example.yaml` | Template do Secret para dev local. **No EKS o Secret vem do Secrets Manager**, materializado pelo workflow de deploy. |
 | `local/20-postgres.yaml` | StatefulSet do Postgres 16 + PVC — só dev local; no EKS o banco é RDS. |
@@ -111,3 +113,24 @@ kubectl -n tech-challenge describe hpa api
 - **Imagem**: os manifestos declaram `tech-challenge-fiap:latest` como estado inicial (funciona no kind via `kind load docker-image`); no EKS a imagem real vem do ECR e é definida pelo deploy — `:latest` estático nunca é usado como mecanismo de rollout.
 - **Exposição**: o Service provisiona um NLB internet-facing via EKS Auto Mode (sem Ingress por enquanto).
 - **HPA**: depende do metrics-server — instalado pela stack `cluster/` do repositório `infra-k8s` (`terraform/cluster/addons.tf`).
+
+## Observabilidade (New Relic)
+
+Duas peças, independentes entre si, ligadas pela mesma chave `NR_LICENSE_KEY` que o
+`infra-db` grava no JSON do Secrets Manager `tech-challenge-fiap/api` (var
+`newrelic_license_key`):
+
+- **Traces da API** — `src/tracing.ts` (OpenTelemetry) exporta direto para
+  `https://otlp.nr-data.net:4318` (ConfigMap). O header `api-key` vem do Secret
+  `newrelic-secrets` (`60-newrelic-secret.example.yaml` é só o template; o real é
+  criado pelo deploy). O `secretKeyRef` é `optional`: sem a chave o pod sobe e a
+  telemetria fica desligada. Conta na região EU usa `otlp.eu01.nr-data.net`.
+- **Integração Kubernetes** — chart `newrelic/nri-bundle` (infra agent, Fluent Bit
+  para logs dos containers, kube-state-metrics) instalado pelo deploy via
+  `helm upgrade --install`, no namespace `newrelic`, uma vez por cluster. Nenhum
+  manifesto neste diretório: o Helm gerencia tudo.
+
+Logs da API saem em JSON (`nestjs-pino`) com `trace.id`/`span.id` do span ativo e
+`userId` quando autenticado — é o que permite correlacionar log e trace no New Relic.
+
+No kind e em dev local não há chave: os pods sobem normalmente, só sem telemetria.
