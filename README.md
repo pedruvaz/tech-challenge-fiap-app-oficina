@@ -229,4 +229,4 @@ direto.
 ## Grupo
 
 - **Grupo:** 66
-- **Integrantes:** Nayara, Pedro, Matheus, Guilherme e Aléxia
+- **Integrantes:** Pedro, Matheus, Guilherme e Aléxia
