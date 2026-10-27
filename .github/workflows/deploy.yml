@@ -136,7 +136,17 @@ jobs:
       # é idempotente, então rodar a cada deploy é seguro. A chave vem do mesmo JSON
       # do Secrets Manager (NR_LICENSE_KEY, var `newrelic_license_key` do infra-db);
       # sem ela o step só avisa e o deploy segue, sem telemetria.
+      #
+      # Observabilidade não bloqueia a release: se o Helm falhar, o step marca
+      # warning e o deploy da API continua (o Secret dos traces é o step seguinte).
+      #
+      # `--force-conflicts`: com server-side apply (Helm >= 3.19 / 4), o 2º upgrade
+      # falha em "conflict ... caBundle" porque o Job `kube-webhook-certgen` do
+      # chart grava o caBundle do webhook com outro field manager. O flag devolve o
+      # campo ao Helm; o hook de patch do certgen preenche de novo após o upgrade.
+      # Em Helm antigo (client-side apply) o flag não existe e o conflito não ocorre.
       - name: New Relic — integração Kubernetes (Helm, idempotente)
+        continue-on-error: true
         run: |
           set -euo pipefail
           NR_LICENSE_KEY=$(aws secretsmanager get-secret-value \
