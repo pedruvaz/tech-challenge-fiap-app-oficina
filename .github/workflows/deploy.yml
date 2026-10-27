@@ -136,6 +136,13 @@ jobs:
       # é idempotente, então rodar a cada deploy é seguro. A chave vem do mesmo JSON
       # do Secrets Manager (NR_LICENSE_KEY, var `newrelic_license_key` do infra-db);
       # sem ela o step só avisa e o deploy segue, sem telemetria.
+      #
+      # `nri-metadata-injection` desligado: é o webhook que injeta metadados do K8s
+      # em pods para agentes APM da New Relic, e a API não usa agente (os traces
+      # vão por OTel direto). Além de inútil aqui, ele quebra o segundo `helm
+      # upgrade`: o job `kube-webhook-certgen` do sub-chart é dono do campo
+      # `caBundle` do MutatingWebhookConfiguration, e o server-side apply do Helm
+      # para com "Apply failed with 1 conflict" — o deploy inteiro morria nesse step.
       - name: New Relic — integração Kubernetes (Helm, idempotente)
         run: |
           set -euo pipefail
@@ -150,6 +157,7 @@ jobs:
           helm upgrade --install newrelic-bundle newrelic/nri-bundle \
             --set global.licenseKey="$NR_LICENSE_KEY" \
             --set global.cluster="${{ vars.EKS_CLUSTER_NAME }}" \
+            --set nri-metadata-injection.enabled=false \
             --namespace newrelic --create-namespace --wait --timeout 5m
 
       # Secret `newrelic-secrets` no namespace do ambiente: o Deployment lê
