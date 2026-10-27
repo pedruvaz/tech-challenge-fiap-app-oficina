@@ -157,7 +157,11 @@ jobs:
             exit 0
           fi
           helm repo add newrelic https://helm-charts.newrelic.com --force-update
-          helm upgrade --install newrelic-bundle newrelic/nri-bundle \
+          CONFLICTS=""
+          if helm upgrade --help 2>/dev/null | grep -q -- '--force-conflicts'; then
+            CONFLICTS="--force-conflicts"
+          fi
+          helm upgrade --install newrelic-bundle newrelic/nri-bundle $CONFLICTS \
             --set global.licenseKey="$NR_LICENSE_KEY" \
             --set global.cluster="${{ vars.EKS_CLUSTER_NAME }}" \
             --namespace newrelic --create-namespace --wait --timeout 5m
