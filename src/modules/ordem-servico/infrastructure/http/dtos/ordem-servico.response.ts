@@ -40,6 +40,15 @@ export class VeiculoResumoDto {
   @ApiProperty() modelo: string;
 }
 
+export class HistoricoStatusResponseDto {
+  @ApiProperty() id: number;
+  @ApiProperty() osId: string;
+  @ApiProperty({ enum: Status, nullable: true }) statusAnterior: Status | null;
+  @ApiProperty({ enum: Status }) statusNovo: Status;
+  @ApiProperty({ nullable: true }) usuarioId: number | null;
+  @ApiProperty() criadoEm: Date;
+}
+
 export class OrdemServicoResponseDto {
   @ApiProperty() osId: string;
   @ApiProperty() usuarioId: number;
@@ -62,4 +71,6 @@ export class OrdemServicoResponseDto {
   pecasUtilizadas?: PecaUtilizadaResponseDto[];
   @ApiProperty({ type: () => [InsumoConsumidoResponseDto] })
   insumosConsumidos?: InsumoConsumidoResponseDto[];
+  @ApiProperty({ type: () => [HistoricoStatusResponseDto], required: false })
+  historicoStatus?: HistoricoStatusResponseDto[];
 }

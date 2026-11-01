@@ -19,6 +19,7 @@ export class OrdemServicoPresenter {
     dto.servicosRealizados = view.servicosRealizados;
     dto.pecasUtilizadas = view.pecasUtilizadas;
     dto.insumosConsumidos = view.insumosConsumidos;
+    if (view.historicoStatus) dto.historicoStatus = view.historicoStatus;
     return dto;
   }
 
