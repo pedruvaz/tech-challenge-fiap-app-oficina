@@ -158,6 +158,8 @@ jobs:
             --set global.licenseKey="$NR_LICENSE_KEY" \
             --set global.cluster="${{ vars.EKS_CLUSTER_NAME }}" \
             --set nri-metadata-injection.enabled=false \
+            --set newrelic-logging.enabled=true \
+            --set kube-state-metrics.enabled=true \
             --namespace newrelic --create-namespace --wait --timeout 5m
 
       # Secret `newrelic-secrets` no namespace do ambiente: o Deployment lê
