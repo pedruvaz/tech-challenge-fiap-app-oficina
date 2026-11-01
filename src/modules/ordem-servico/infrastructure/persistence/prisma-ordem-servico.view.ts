@@ -26,6 +26,13 @@ const includes = {
   insumosConsumidos: { include: { insumo: true } },
 } satisfies Prisma.OrdemServicoInclude;
 
+const includesDetalhe = {
+  ...includes,
+  historicoStatus: {
+    orderBy: [{ criadoEm: 'asc' }, { id: 'asc' }],
+  },
+} satisfies Prisma.OrdemServicoInclude;
+
 type RawRow = Prisma.OrdemServicoGetPayload<{ include: typeof includes }>;
 
 function paraNumero(v: Prisma.Decimal | number | string): number {
@@ -93,9 +100,20 @@ export class PrismaOrdemServicoView extends OrdemServicoViewRepository {
   async buscarPorId(osId: string): Promise<OrdemServicoView | null> {
     const row = await this.ctx.cliente().ordemServico.findFirst({
       where: { osId, deletadoEm: null },
-      include: includes,
+      include: includesDetalhe,
     });
-    return row ? projetar(row) : null;
+    if (!row) return null;
+    return {
+      ...projetar(row),
+      historicoStatus: row.historicoStatus.map((h) => ({
+        id: h.id,
+        osId: h.osId,
+        statusAnterior: h.statusAnterior,
+        statusNovo: h.statusNovo,
+        usuarioId: h.usuarioId,
+        criadoEm: h.criadoEm,
+      })),
+    };
   }
 
   async listar(filtros?: FiltrosOrdemServico): Promise<OrdemServicoView[]> {

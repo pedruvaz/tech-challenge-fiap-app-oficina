@@ -93,6 +93,27 @@ describe('OrdemServicoPresenter', () => {
     expect(dto.insumosConsumidos?.[0].qtdConsumida).toBe(4);
   });
 
+  it('repassa o histórico de status quando a view o traz', () => {
+    const historicoStatus = [
+      {
+        id: 1,
+        osId: 'os-1',
+        statusAnterior: null,
+        statusNovo: 'recebida' as const,
+        usuarioId: 1,
+        criadoEm: new Date('2024-01-01T00:00:00Z'),
+      },
+    ];
+
+    expect(
+      OrdemServicoPresenter.apresentar(view({ historicoStatus }))
+        .historicoStatus,
+    ).toEqual(historicoStatus);
+    expect(OrdemServicoPresenter.apresentar(view()).historicoStatus).toBe(
+      undefined,
+    );
+  });
+
   it('preserva deletadoEm de OS removidas', () => {
     const deletadoEm = new Date('2024-03-01T00:00:00Z');
 

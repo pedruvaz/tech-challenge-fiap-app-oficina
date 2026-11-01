@@ -37,6 +37,15 @@ export type OrdemServicoView = {
     qtdConsumida: number;
     valor: number;
   }>;
+  // Só vem em buscarPorId: a listagem não precisa do histórico de cada OS.
+  historicoStatus?: Array<{
+    id: number;
+    osId: string;
+    statusAnterior: StatusOSValor | null;
+    statusNovo: StatusOSValor;
+    usuarioId: number | null;
+    criadoEm: Date;
+  }>;
 };
 
 export abstract class OrdemServicoViewRepository {

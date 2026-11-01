@@ -40,6 +40,16 @@ const linhaCompleta = (over: Record<string, unknown> = {}) => ({
       insumo: { nome: 'Óleo 5W30' },
     },
   ],
+  historicoStatus: [
+    {
+      id: 1,
+      osId: 'os-1',
+      statusAnterior: null,
+      statusNovo: 'recebida',
+      usuarioId: 3,
+      criadoEm: new Date('2024-01-01T00:00:00Z'),
+    },
+  ],
   ...over,
 });
 
@@ -51,6 +61,7 @@ const linhaMinima = (over: Record<string, unknown> = {}) =>
     servicosRealizados: [],
     pecasUtilizadas: [],
     insumosConsumidos: [],
+    historicoStatus: [],
     ...over,
   });
 
@@ -82,6 +93,30 @@ describe('PrismaOrdemServicoView', () => {
       expect(projecao?.mecanico).toEqual({ idUsuario: 3, nome: 'Carlos' });
       expect(projecao?.cliente?.numDocumento).toBe('111.444.777-35');
       expect(projecao?.veiculo?.placa).toBe('ABC1D23');
+    });
+
+    it('traz o histórico de status em ordem cronológica', async () => {
+      const { view, ordemServico } = montar();
+      ordemServico.findFirst.mockResolvedValue(linhaCompleta());
+
+      const projecao = await view.buscarPorId('os-1');
+
+      const [consulta] = ordemServico.findFirst.mock.calls[0] as [
+        { include: { historicoStatus: unknown } },
+      ];
+      expect(consulta.include.historicoStatus).toEqual({
+        orderBy: [{ criadoEm: 'asc' }, { id: 'asc' }],
+      });
+      expect(projecao?.historicoStatus).toEqual([
+        {
+          id: 1,
+          osId: 'os-1',
+          statusAnterior: null,
+          statusNovo: 'recebida',
+          usuarioId: 3,
+          criadoEm: new Date('2024-01-01T00:00:00Z'),
+        },
+      ]);
     });
 
     it('devolve null quando a OS não existe', async () => {

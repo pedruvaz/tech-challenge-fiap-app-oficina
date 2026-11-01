@@ -40,6 +40,16 @@ describe('Consulta publica da OS (e2e)', () => {
     expect((resposta.body as { osId: string }).osId).toBe(osId);
   });
 
+  it('retorna o historico de status, que a tela de consulta percorre', async () => {
+    const resposta = await request(app.getHttpServer())
+      .get(rota(osId))
+      .query({ numDocumento })
+      .expect(200);
+
+    const { historicoStatus } = resposta.body as { historicoStatus: unknown };
+    expect(Array.isArray(historicoStatus)).toBe(true);
+  });
+
   it('aceita o documento com e sem mascara', async () => {
     const semMascara = numDocumento.replace(/\D/g, '');
 
