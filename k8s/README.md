@@ -132,5 +132,7 @@ Duas peças, independentes entre si, ligadas pela mesma chave `NR_LICENSE_KEY` q
 
 Logs da API saem em JSON (`nestjs-pino`) com `trace.id`/`span.id` do span ativo e
 `userId` quando autenticado — é o que permite correlacionar log e trace no New Relic.
+Para achar um request: copie o `trace.id` de `kubectl logs deploy/api -c api` e busque
+o valor na tela Logs do New Relic.
 
 No kind e em dev local não há chave: os pods sobem normalmente, só sem telemetria.
